@@ -2,6 +2,6 @@ fastapi
 uvicorn
 psycopg2-binary
 pgvector
-sentence-transformers
+fastembed
 openai
 pydantic

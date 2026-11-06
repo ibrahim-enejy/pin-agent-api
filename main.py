@@ -2,13 +2,13 @@ import os
 import psycopg2
 from fastapi import FastAPI, BackgroundTasks
 from pydantic import BaseModel
-from sentence_transformers import SentenceTransformer
+from fastembed import TextEmbedding
 from openai import OpenAI
 
 app = FastAPI(title="Pin Agent Hybrid Search API")
 
 print("Loading local embedding model...")
-embedder = SentenceTransformer('all-MiniLM-L6-v2')
+embedder = TextEmbedding(model_name="sentence-transformers/all-MiniLM-L6-v2")
 
 # Uses Groq by default (100% free, no card). Override LLM_BASE_URL if using Nebius.
 llm_client = OpenAI(
@@ -24,7 +24,7 @@ class MessageInput(BaseModel):
 
 def save_to_db(chat_id: str, source_type: str, raw_content: str, summary: str):
     """Embeds the concise summary into 384 numbers and saves to Neon Postgres."""
-    vector = embedder.encode(summary).tolist()
+    vector = list(embedder.embed([summary]))[0].tolist()
     conn = psycopg2.connect(DB_URL)
     cur = conn.cursor()
     cur.execute(
@@ -78,7 +78,7 @@ def observe_stream(msg: MessageInput, bg_tasks: BackgroundTasks):
 
 @app.get("/search")
 def hybrid_search(chat_id: str, q: str):
-    query_vector = embedder.encode(q).tolist()
+    query_vector = list(embedder.embed([q]))[0].tolist()
     conn = psycopg2.connect(DB_URL)
     cur = conn.cursor()
     
