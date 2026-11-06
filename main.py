@@ -1,11 +1,19 @@
 import os
 import psycopg2
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI, BackgroundTasks
 from pydantic import BaseModel
 from fastembed import TextEmbedding
 from openai import OpenAI
 
 app = FastAPI(title="Pin Agent Hybrid Search API")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allows your Chrome extension to talk to the API
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 print("Loading local embedding model...")
 embedder = TextEmbedding(model_name="sentence-transformers/all-MiniLM-L6-v2")

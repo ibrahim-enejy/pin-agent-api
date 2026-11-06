@@ -1,0 +1,86 @@
+import os
+import psycopg2
+from fastapi import FastAPI, BackgroundTasks
+from pydantic import BaseModel
+from sentence_transformers import SentenceTransformer
+from openai import OpenAI
+
+app = FastAPI()
+
+print("Loading local embedding model (all-MiniLM-L6-v2)...")
+embedder = SentenceTransformer('all-MiniLM-L6-v2')
+
+# Point to Groq's free API endpoint
+llm_client = OpenAI(
+    base_url="https://api.groq.com/openai/v1",
+    api_key=os.getenv("GROQ_API_KEY")
+)
+
+DB_URL = os.getenv("DATABASE_URL")
+
+class MessageInput(BaseModel):
+    chat_id: str
+    text: str
+
+def save_to_db(chat_id: str, source_type: str, raw_content: str, summary: str):
+    vector = embedder.encode(summary).tolist()
+    conn = psycopg2.connect(DB_URL)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO saved_context (chat_id, source_type, raw_content, summary, embedding)
+        VALUES (%s, %s, %s, %s, %s::vector)
+        """,
+        (chat_id, source_type, raw_content, summary, str(vector))
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+    print(f"[SAVED] Type: {source_type} | Summary: {summary}")
+
+def async_process_message(chat_id: str, text: str, is_manual: bool):
+    if is_manual:
+        resp = llm_client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[
+                {"role": "system", "content": "Summarize the core technical takeaway or facts of this message in 2 concise sentences for a search index."},
+                {"role": "user", "content": text}
+            ]
+        )
+        summary = resp.choices[0].message.content.strip()
+        save_to_db(chat_id, "manual_pin", text, summary)
+    else:
+        resp = llm_client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[
+                {"role": "system", "content": "You are an artifact extraction agent. If the user's text contains a reusable code block, CLI command, configuration, or architectural decision, output a 1-sentence summary, followed by '|||', followed by the extracted artifact. If the message is conversational filler or lacks a concrete artifact, reply with the exact word 'NONE'."},
+                {"role": "user", "content": text}
+            ]
+        )
+        output = resp.choices[0].message.content.strip()
+        if output != "NONE" and "|||" in output:
+            summary, artifact = output.split("|||", 1)
+            save_to_db(chat_id, "async_artifact", artifact.strip(), summary.strip())
+        else:
+            print("[IGNORED] Agent decided message contained no high-value artifact.")
+
+@app.post("/pin")
+def manual_pin(msg: MessageInput, bg_tasks: BackgroundTasks):
+    bg_tasks.add_task(async_process_message, msg.chat_id, msg.text, True)
+    return {"status": "Pin queued for background indexing"}
+
+@app.post("/observe")
+def observe_stream(msg: MessageInput, bg_tasks: BackgroundTasks):
+    bg_tasks.add_task(async_process_message, msg.chat_id, msg.text, False)
+    return {"status": "Agent observing message in background"}
+
+@app.get("/search")
+def hybrid_search(chat_id: str, q: str):
+    query_vector = embedder.encode(q).tolist()
+    conn = psycopg2.connect(DB_URL)
+    cur = conn.cursor()
+    
+    sql = """
+    WITH semantic_search AS (
+        SELECT id, RANK() OVER (ORDER BY embedding <=> %x
+
